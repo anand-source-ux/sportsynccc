@@ -1,444 +1,445 @@
-from flask import Flask, request, redirect, url_for, render_template_string, flash
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+import streamlit as st
+import sqlite3
+import pandas as pd
 import uuid
 import qrcode
 import os
+from datetime import datetime
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'sportsync123'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///sportsync.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# ==========================
+# DATABASE
+# ==========================
 
-db = SQLAlchemy(app)
+conn = sqlite3.connect("sportsync.db", check_same_thread=False)
+c = conn.cursor()
 
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = "login"
+c.execute("""
+CREATE TABLE IF NOT EXISTS users(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+name TEXT,
+email TEXT UNIQUE,
+password TEXT,
+role TEXT
+)
+""")
 
-# --------------------------
-# DATABASE MODELS
-# --------------------------
+c.execute("""
+CREATE TABLE IF NOT EXISTS bookings(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+user_email TEXT,
+sport TEXT,
+booking_date TEXT,
+time_slot TEXT,
+booking_code TEXT UNIQUE
+)
+""")
 
-class User(UserMixin, db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(100), unique=True)
-    password = db.Column(db.String(100))
-    role = db.Column(db.String(20))
+c.execute("""
+CREATE TABLE IF NOT EXISTS performance(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+booking_code TEXT,
+distance REAL,
+speed REAL,
+accuracy REAL,
+coach_notes TEXT
+)
+""")
 
-class Booking(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    sport = db.Column(db.String(100))
-    slot = db.Column(db.String(100))
-    booking_code = db.Column(db.String(50))
-    qr_file = db.Column(db.String(200))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+conn.commit()
 
-class Performance(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    booking_code = db.Column(db.String(50))
-    metric = db.Column(db.String(100))
-    score = db.Column(db.String(100))
-    coach_comment = db.Column(db.String(500))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+# ==========================
+# FUNCTIONS
+# ==========================
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
+def register_user(name,email,password,role):
+    try:
+        c.execute(
+            "INSERT INTO users(name,email,password,role) VALUES(?,?,?,?)",
+            (name,email,password,role)
+        )
+        conn.commit()
+        return True
+    except:
+        return False
 
-# --------------------------
-# HTML TEMPLATE
-# --------------------------
+def login_user(email,password):
+    c.execute(
+        "SELECT * FROM users WHERE email=? AND password=?",
+        (email,password)
+    )
+    return c.fetchone()
 
-BASE_STYLE = """
-<style>
-body{
-font-family:Arial;
-background:#f4f4f4;
-padding:20px;
-}
-.container{
-background:white;
-padding:20px;
-border-radius:10px;
-max-width:800px;
-margin:auto;
-}
-input,select,textarea{
-width:100%;
-padding:10px;
-margin:8px 0;
-}
-button{
-padding:10px 20px;
-background:#0d6efd;
-color:white;
-border:none;
-cursor:pointer;
-}
-a{
-text-decoration:none;
-margin-right:10px;
-}
-.card{
-border:1px solid #ddd;
-padding:10px;
-margin-top:10px;
-border-radius:8px;
-}
-</style>
-"""
+def generate_booking_code():
+    return str(uuid.uuid4())[:8].upper()
 
-# --------------------------
-# HOME
-# --------------------------
+def create_qr(code):
+    if not os.path.exists("qrcodes"):
+        os.mkdir("qrcodes")
 
-@app.route("/")
-def home():
-    return redirect("/login")
+    path=f"qrcodes/{code}.png"
 
-# --------------------------
-# REGISTER
-# --------------------------
+    qr=qrcode.make(code)
+    qr.save(path)
 
-@app.route("/register", methods=["GET", "POST"])
-def register():
+    return path
 
-    if request.method == "POST":
+# ==========================
+# SESSION
+# ==========================
 
-        user = User(
-            username=request.form["username"],
-            password=request.form["password"],
-            role=request.form["role"]
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in=False
+
+if "user" not in st.session_state:
+    st.session_state.user=None
+
+# ==========================
+# HEADER
+# ==========================
+
+st.set_page_config(
+    page_title="SportsSync",
+    page_icon="🏆",
+    layout="wide"
+)
+
+st.title("🏆 SportsSync")
+st.caption("Smart Sports Facility Booking & Performance Tracking")
+
+# ==========================
+# LOGIN PAGE
+# ==========================
+
+if not st.session_state.logged_in:
+
+    tab1,tab2=st.tabs(["Login","Register"])
+
+    with tab1:
+
+        st.subheader("Login")
+
+        email=st.text_input("Email")
+        password=st.text_input("Password",type="password")
+
+        if st.button("Login"):
+
+            user=login_user(email,password)
+
+            if user:
+                st.session_state.logged_in=True
+                st.session_state.user=user
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+    with tab2:
+
+        st.subheader("Register")
+
+        name=st.text_input("Full Name")
+        reg_email=st.text_input("Email Address")
+        reg_password=st.text_input("Password",type="password")
+
+        role=st.selectbox(
+            "Role",
+            ["Student","Coach"]
         )
 
-        db.session.add(user)
-        db.session.commit()
+        if st.button("Register"):
 
-        return redirect("/login")
+            success=register_user(
+                name,
+                reg_email,
+                reg_password,
+                role
+            )
 
-    return render_template_string(BASE_STYLE + """
+            if success:
+                st.success("Account created")
+            else:
+                st.error("Email already exists")
 
-    <div class="container">
-
-    <h1>SportSync Registration</h1>
-
-    <form method="POST">
-
-    <input name="username" placeholder="Username" required>
-
-    <input type="password"
-           name="password"
-           placeholder="Password"
-           required>
-
-    <select name="role">
-        <option value="student">Student</option>
-        <option value="coach">Coach</option>
-    </select>
-
-    <button type="submit">Register</button>
-
-    </form>
-
-    <a href="/login">Login</a>
-
-    </div>
-    """)
-
-# --------------------------
-# LOGIN
-# --------------------------
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-
-    if request.method == "POST":
-
-        user = User.query.filter_by(
-            username=request.form["username"],
-            password=request.form["password"]
-        ).first()
-
-        if user:
-            login_user(user)
-            return redirect("/dashboard")
-
-    return render_template_string(BASE_STYLE + """
-
-    <div class="container">
-
-    <h1>SportSync Login</h1>
-
-    <form method="POST">
-
-    <input name="username"
-           placeholder="Username"
-           required>
-
-    <input type="password"
-           name="password"
-           placeholder="Password"
-           required>
-
-    <button type="submit">
-    Login
-    </button>
-
-    </form>
-
-    <a href="/register">
-    Create Account
-    </a>
-
-    </div>
-    """)
-
-# --------------------------
+# ==========================
 # DASHBOARD
-# --------------------------
+# ==========================
 
-@app.route("/dashboard")
-@login_required
-def dashboard():
+else:
 
-    bookings = Booking.query.filter_by(
-        user_id=current_user.id
-    ).all()
+    user=st.session_state.user
 
-    return render_template_string(BASE_STYLE + """
+    username=user[1]
+    email=user[2]
+    role=user[4]
 
-    <div class="container">
+    st.sidebar.success(f"Welcome {username}")
+    st.sidebar.write(f"Role: {role}")
 
-    <h1>SportSync Dashboard</h1>
+    page=st.sidebar.radio(
+        "Navigation",
+        [
+            "Dashboard",
+            "Book Slot",
+            "Track Performance",
+            "Bookings",
+            "Coach Panel"
+        ]
+    )
 
-    <h3>
-    Welcome {{user.username}}
-    ({{user.role}})
-    </h3>
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in=False
+        st.rerun()
 
-    <a href="/book">Book Slot</a>
-    <a href="/performance">Track Performance</a>
-    <a href="/progress">View Progress</a>
-    <a href="/logout">Logout</a>
+    # ==========================
+    # DASHBOARD
+    # ==========================
 
-    <hr>
+    if page=="Dashboard":
 
-    <h2>Your Bookings</h2>
+        st.header("📊 Dashboard")
 
-    {% for b in bookings %}
-
-    <div class="card">
-
-    <b>Sport:</b> {{b.sport}} <br>
-
-    <b>Slot:</b> {{b.slot}} <br>
-
-    <b>Booking Code:</b> {{b.booking_code}} <br>
-
-    <img src="/{{b.qr_file}}" width="150">
-
-    </div>
-
-    {% endfor %}
-
-    </div>
-
-    """, user=current_user, bookings=bookings)
-
-# --------------------------
-# BOOK SLOT
-# --------------------------
-
-@app.route("/book", methods=["GET", "POST"])
-@login_required
-def book():
-
-    if request.method == "POST":
-
-        sport = request.form["sport"]
-        slot = request.form["slot"]
-
-        booking_code = str(uuid.uuid4())[:8]
-
-        os.makedirs("static/qr", exist_ok=True)
-
-        qr_path = f"static/qr/{booking_code}.png"
-
-        qr = qrcode.make(booking_code)
-        qr.save(qr_path)
-
-        booking = Booking(
-            sport=sport,
-            slot=slot,
-            booking_code=booking_code,
-            qr_file=qr_path,
-            user_id=current_user.id
+        bookings_df=pd.read_sql_query(
+            f"""
+            SELECT * FROM bookings
+            WHERE user_email='{email}'
+            """,
+            conn
         )
 
-        db.session.add(booking)
-        db.session.commit()
-
-        return redirect("/dashboard")
-
-    return render_template_string(BASE_STYLE + """
-
-    <div class="container">
-
-    <h1>Book Sports Facility</h1>
-
-    <form method="POST">
-
-    <select name="sport">
-
-        <option>Basketball</option>
-        <option>Football</option>
-        <option>Cricket</option>
-        <option>Gym</option>
-        <option>Swimming</option>
-        <option>Table Tennis</option>
-        <option>Tennis</option>
-        <option>Snooker</option>
-
-    </select>
-
-    <input name="slot"
-           placeholder="Example: 4PM-5PM"
-           required>
-
-    <button type="submit">
-    Book Now
-    </button>
-
-    </form>
-
-    <a href="/dashboard">
-    Dashboard
-    </a>
-
-    </div>
-    """)
-
-# --------------------------
-# PERFORMANCE ENTRY
-# --------------------------
-
-@app.route("/performance", methods=["GET", "POST"])
-@login_required
-def performance():
-
-    if request.method == "POST":
-
-        record = Performance(
-            booking_code=request.form["booking_code"],
-            metric=request.form["metric"],
-            score=request.form["score"],
-            coach_comment=request.form["coach_comment"],
-            user_id=current_user.id
+        st.metric(
+            "Total Bookings",
+            len(bookings_df)
         )
 
-        db.session.add(record)
-        db.session.commit()
+        perf_df=pd.read_sql_query(
+            "SELECT * FROM performance",
+            conn
+        )
 
-        return redirect("/progress")
+        if len(perf_df)>0:
 
-    return render_template_string(BASE_STYLE + """
+            st.subheader("Performance Trend")
 
-    <div class="container">
+            chart_df=perf_df[
+                ["distance","speed","accuracy"]
+            ]
 
-    <h1>Performance Tracking</h1>
+            st.line_chart(chart_df)
 
-    <form method="POST">
+        else:
+            st.info("No performance records yet")
 
-    <input name="booking_code"
-           placeholder="Booking Code"
-           required>
+    # ==========================
+    # BOOK SLOT
+    # ==========================
 
-    <input name="metric"
-           placeholder="Metric"
-           required>
+    elif page=="Book Slot":
 
-    <input name="score"
-           placeholder="Score"
-           required>
+        st.header("🏟 Book Sports Facility")
 
-    <textarea
-    name="coach_comment"
-    placeholder="Coach Feedback">
-    </textarea>
+        sports=[
+            "Basketball",
+            "Football",
+            "Cricket",
+            "Gym",
+            "Swimming",
+            "Table Tennis",
+            "Tennis",
+            "Snooker"
+        ]
 
-    <button type="submit">
-    Save Performance
-    </button>
+        sport=st.selectbox(
+            "Sport",
+            sports
+        )
 
-    </form>
+        booking_date=st.date_input(
+            "Booking Date"
+        )
 
-    </div>
-    """)
+        slot=st.selectbox(
+            "Time Slot",
+            [
+                "06:00-07:00",
+                "07:00-08:00",
+                "08:00-09:00",
+                "17:00-18:00",
+                "18:00-19:00",
+                "19:00-20:00"
+            ]
+        )
 
-# --------------------------
-# VIEW PROGRESS
-# --------------------------
+        if st.button("Book Now"):
 
-@app.route("/progress")
-@login_required
-def progress():
+            code=generate_booking_code()
 
-    records = Performance.query.filter_by(
-        user_id=current_user.id
-    ).all()
+            c.execute(
+                """
+                INSERT INTO bookings(
+                user_email,
+                sport,
+                booking_date,
+                time_slot,
+                booking_code
+                )
+                VALUES(?,?,?,?,?)
+                """,
+                (
+                    email,
+                    sport,
+                    str(booking_date),
+                    slot,
+                    code
+                )
+            )
 
-    return render_template_string(BASE_STYLE + """
+            conn.commit()
 
-    <div class="container">
+            qr_path=create_qr(code)
 
-    <h1>Performance Progress</h1>
+            st.success("Booking Successful")
 
-    <a href="/dashboard">
-    Dashboard
-    </a>
+            st.write(
+                f"Booking Code: {code}"
+            )
 
-    {% for r in records %}
+            st.image(qr_path,width=250)
 
-    <div class="card">
+    # ==========================
+    # TRACK PERFORMANCE
+    # ==========================
 
-    <b>Booking Code:</b>
-    {{r.booking_code}}<br>
+    elif page=="Track Performance":
 
-    <b>Metric:</b>
-    {{r.metric}}<br>
+        st.header("📈 Performance Tracking")
 
-    <b>Score:</b>
-    {{r.score}}<br>
+        booking_code=st.text_input(
+            "Booking Code"
+        )
 
-    <b>Coach Comment:</b>
-    {{r.coach_comment}}<br>
+        distance=st.number_input(
+            "Distance Covered (m)",
+            min_value=0.0
+        )
 
-    </div>
+        speed=st.number_input(
+            "Average Speed",
+            min_value=0.0
+        )
 
-    {% endfor %}
+        accuracy=st.slider(
+            "Accuracy %",
+            0,
+            100
+        )
 
-    </div>
+        if st.button("Save Performance"):
 
-    """, records=records)
+            c.execute(
+                """
+                INSERT INTO performance(
+                booking_code,
+                distance,
+                speed,
+                accuracy,
+                coach_notes
+                )
+                VALUES(?,?,?,?,?)
+                """,
+                (
+                    booking_code,
+                    distance,
+                    speed,
+                    accuracy,
+                    ""
+                )
+            )
 
-# --------------------------
-# LOGOUT
-# --------------------------
+            conn.commit()
 
-@app.route("/logout")
-@login_required
-def logout():
-    logout_user()
-    return redirect("/login")
+            st.success(
+                "Performance Added"
+            )
 
-# --------------------------
-# START APP
-# --------------------------
+    # ==========================
+    # BOOKINGS
+    # ==========================
 
-if __name__ == "__main__":
+    elif page=="Bookings":
 
-    with app.app_context():
-        db.create_all()
+        st.header("📋 Booking History")
 
-    app.run(debug=True)
+        df=pd.read_sql_query(
+            f"""
+            SELECT *
+            FROM bookings
+            WHERE user_email='{email}'
+            """,
+            conn
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True
+        )
+
+    # ==========================
+    # COACH PANEL
+    # ==========================
+
+    elif page=="Coach Panel":
+
+        if role!="Coach":
+            st.warning(
+                "Only coaches can access this page"
+            )
+
+        else:
+
+            st.header("🧑‍🏫 Coach Insights")
+
+            booking_code=st.text_input(
+                "Booking Code"
+            )
+
+            coach_note=st.text_area(
+                "Feedback"
+            )
+
+            if st.button(
+                "Save Feedback"
+            ):
+
+                c.execute(
+                    """
+                    UPDATE performance
+                    SET coach_notes=?
+                    WHERE booking_code=?
+                    """,
+                    (
+                        coach_note,
+                        booking_code
+                    )
+                )
+
+                conn.commit()
+
+                st.success(
+                    "Feedback Added"
+                )
+
+            st.subheader(
+                "All Performance Records"
+            )
+
+            df=pd.read_sql_query(
+                """
+                SELECT *
+                FROM performance
+                """,
+                conn
+            )
+
+            st.dataframe(
+                df,
+                use_container_width=True
+            )
